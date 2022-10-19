@@ -89,3 +89,14 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+// weightset system call function
+int sys_weightset(void)
+{
+	int weight; // receive weight from sdebug_func
+	if(argint(0, &weight) < 0) return -1 ; 
+	do_weightset(weight); 
+	// send weight(received) to do_weightset 
+	// -> allocate to new struct proc
+	return 0;
+}

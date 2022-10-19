@@ -7,9 +7,21 @@
 #include "proc.h"
 #include "spinlock.h"
 
+// time slice used in updating priority in process( struct proc* )
+#define TIME_SLICE 10000000
+#define NULL ((void *)0)
+
+// set weight in allocproc
+// but it is unused because of sys_weighetset() called in sdebug
+int weight = 1;
+
 struct {
   struct spinlock lock;
   struct proc proc[NPROC];
+  
+  // ptable's min_priority
+  // for setting priority when new process is made( send this value to new struct proc* )
+  long min_priority;
 } ptable;
 
 static struct proc *initproc;
@@ -17,6 +29,67 @@ static struct proc *initproc;
 int nextpid = 1;
 extern void forkret(void);
 extern void trapret(void);
+
+
+// ssu_schedule : called in void scheduler()
+// getting next process struct 
+// according to the smallest priority in proc struct in ptable 
+struct proc *ssu_schedule()
+{
+	struct proc *p; // value for cycle
+	struct proc *ret = NULL; // proc struct for return
+	
+	// setting next process struct
+	for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+		if(p->state == RUNNABLE) {
+			if(ret == NULL || (p->priority < ret->priority)) 
+				ret = p; // proc struct with smallest priority
+		}
+	}
+	
+	// if debug=1 option input in Makefile
+#ifdef DEBUG
+if(ret)
+	cprintf("PID: %d, NAME: %s, WEIGHT: %d, PRIORITY: %d\n", ret->pid, ret->name, ret->weight, ret->priority);
+#endif
+	return ret; // return the chosen next process to scheduler()
+}
+
+// update priority : should set new priority with time goes on 
+// when chosen in schedule() : set new priority ( time slice divided by weight added )
+// when not chosen in schedule() : never set priority 
+// -> process( struct proc ) with the smallest priority will chosen next 
+void update_priority(struct proc *proc)
+{
+	proc->priority = proc->priority + TIME_SLICE/(proc->weight);
+}
+
+// update ptable's min_priority with processes'( in ptable ) smallest priority
+// to assign ptable's min_priority to new process when new process struct constructed
+void update_min_priority()
+{
+	struct proc *min = NULL;
+	struct proc *p;
+	
+	// implement
+	for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+		if(p->state == RUNNABLE) {
+			if(min == NULL || (min->priority > p->priority)) 
+				min = p ; // get process with smallest priority
+		}
+	}
+	
+	if(min != NULL)
+		ptable.min_priority = min->priority; // update ptable's min_priority
+}
+
+// assign miminum priority with ptable's min_priority to new process +
+// update min_priority when wakeup
+// parameter( struct proc * ) : new constructed process struct
+void assign_min_priority(struct proc *proc)
+{
+	proc->priority = ptable.min_priority;
+}
 
 static void wakeup1(void *chan);
 
@@ -86,6 +159,12 @@ allocproc(void)
   return 0;
 
 found:
+  // implement
+  // new process struct constructed, 
+  // set priority, weight in proc 
+  assign_min_priority(p); // assign smallest priority in ptable to new process to process soon
+  p->weight = weight++; // weight + 1 for assigning weight to the next process constructed
+
   p->state = EMBRYO;
   p->pid = nextpid++;
 
@@ -123,6 +202,7 @@ userinit(void)
   struct proc *p;
   extern char _binary_initcode_start[], _binary_initcode_size[];
 
+  ptable.min_priority = 3;
   p = allocproc();
   
   initproc = p;
@@ -319,6 +399,7 @@ wait(void)
 //  - swtch to start running that process
 //  - eventually that process transfers control
 //      via swtch back to the scheduler.
+
 void
 scheduler(void)
 {
@@ -331,29 +412,35 @@ scheduler(void)
     sti();
 
     // Loop over process table looking for process to run.
-    acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
-        continue;
-
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
+    acquire(&ptable.lock); // lock the resource
+    
+    // not cycle the ptable : using ssu_schedule
+    p = ssu_schedule();
+    if(p == NULL) { // never exists : unlock the resource
+    	release(&ptable.lock);
+    	continue;
+    }
+    
+    // run the process : context switch
       c->proc = p;
       switchuvm(p);
       p->state = RUNNING;
 
       swtch(&(c->scheduler), p->context);
       switchkvm();
+      
+      update_priority(p);
+      update_min_priority();      
 
       // Process is done running for now.
       // It should have changed its p->state before coming back.
       c->proc = 0;
-    }
-    release(&ptable.lock);
+    
+    release(&ptable.lock); // unlock the resource
 
   }
 }
+
 
 // Enter scheduler.  Must hold only ptable.lock
 // and have changed proc->state. Saves and restores
@@ -461,7 +548,11 @@ wakeup1(void *chan)
 
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
     if(p->state == SLEEPING && p->chan == chan)
+    {
       p->state = RUNNABLE;
+      assign_min_priority(p); 
+      // priority update as time goes on 
+    }
 }
 
 // Wake up all processes sleeping on chan.
@@ -531,4 +622,16 @@ procdump(void)
     }
     cprintf("\n");
   }
+}
+
+// adjust proc's weight ( in init )
+// called from sys_weightset() in sysproc.c
+// sys_weightset() : called from sdebug_func() in sdebug.c
+void do_weightset(int w) // OSLAB , never use variable-name "weight"
+{
+	// change resources : should execute resource lock
+	acquire(&ptable.lock);
+	struct proc *my_proc = myproc(); // get proc struct of my process
+	my_proc->weight = w; // update my weight ( from weight parameter = w )
+	release(&ptable.lock); // execute resource lock
 }
